@@ -1,14 +1,235 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Particle Effect</title>
-    <link rel="stylesheet" href="style.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+    <title>Advanced 3D Hand Particle System</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <!-- Core Three.js -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #000; color: #fff; margin: 0; overflow: hidden; }
+        #container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #permission-prompt { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.5em; color: #ff4444; display: none; }
+        #camera-view { position: absolute; bottom: 20px; left: 20px; width: 320px; height: 240px; background-color: #111; border: 2px solid #333; border-radius: 8px; z-index: 10; }
+        .input_video { display: none; }
+    </style>
 </head>
 <body>
-    <canvas id="particle-canvas"></canvas>
-    <script src="script.js"></script>
+    <div id="container"></div>
+    <div id="permission-prompt">需要摄像头权限以实现手部检测</div>
+    <canvas id="camera-view"></canvas>
+    <video class="input_video"></video>
+
+    <script id="vertexShader" type="x-shader/x-vertex">
+        attribute vec2 uv_override;
+        attribute float opacity;
+        varying vec2 vUv;
+        varying float vOpacity;
+        void main() {
+            vUv = uv_override;
+            vOpacity = opacity;
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = 2.5 * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script id="fragmentShader" type="x-shader/x-fragment">
+        uniform sampler2D pointTexture;
+        uniform sampler2D gradientTexture;
+        varying vec2 vUv;
+        varying float vOpacity;
+        void main() {
+            vec4 colorFromGradient = texture2D(gradientTexture, vUv);
+            vec4 colorFromPoint = texture2D(pointTexture, gl_PointCoord);
+            gl_FragColor = vec4(colorFromGradient.rgb, colorFromGradient.a * colorFromPoint.a * vOpacity);
+        }
+    </script>
+    
+    <script>
+        const MAX_HANDS = 2;
+        const PARTICLES_PER_HAND = 5000;
+        const TOTAL_PARTICLES = MAX_HANDS * PARTICLES_PER_HAND;
+        const FADE_OUT_TIME = 1000;
+
+        let renderer, scene, camera, particles;
+        const handParticlesManager = [];
+
+        const container = document.getElementById('container');
+        const permissionPrompt = document.getElementById('permission-prompt');
+        const videoElement = document.querySelector('.input_video');
+        const cameraViewCanvas = document.getElementById('camera-view');
+        const cameraViewCtx = cameraViewCanvas.getContext('2d');
+
+        async function startApp() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+                videoElement.srcObject = stream;
+                await new Promise(resolve => { videoElement.onplaying = resolve; videoElement.play(); });
+                initialize();
+            } catch (err) {
+                console.error("Error accessing camera: ", err);
+                permissionPrompt.style.display = 'block';
+            }
+        }
+
+        function initialize() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 80;
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            initParticles();
+            initMediaPipe();
+            animate();
+        }
+
+        function createGradientTexture() {
+            const size = 128;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const context = canvas.getContext('2d');
+            const gradient = context.createLinearGradient(0, 0, size, size);
+            gradient.addColorStop(0, '#ff00ff'); gradient.addColorStop(0.5, '#00ffff'); gradient.addColorStop(1, '#ffff00');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, size, size);
+            return new THREE.CanvasTexture(canvas);
+        }
+        
+        function createPointTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128; canvas.height = 128;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.5, 'rgba(255,255,255,0.5)');
+            gradient.addColorStop(1, 'rgba(255,255,255,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 128, 128);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function initParticles() {
+            for (let i = 0; i < MAX_HANDS; i++) {
+                handParticlesManager.push({ isActive: false, lastSeen: 0, currentOpacity: 0, targetOpacity: 0 });
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES * 3), 3));
+            geometry.setAttribute('uv_override', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES * 2), 2));
+            geometry.setAttribute('targetPos', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES * 3), 3));
+            geometry.setAttribute('opacity', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES), 1));
+            
+            const shaderMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    pointTexture: { value: createPointTexture() },
+                    gradientTexture: { value: createGradientTexture() }
+                },
+                vertexShader: document.getElementById('vertexShader').textContent,
+                fragmentShader: document.getElementById('fragmentShader').textContent,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                depthWrite: false,
+            });
+
+            particles = new THREE.Points(geometry, shaderMaterial);
+            scene.add(particles);
+        }
+
+        function initMediaPipe() {
+            const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}` });
+            hands.setOptions({ maxNumHands: MAX_HANDS, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            hands.onResults(onResults);
+            const mpCamera = new Camera(videoElement, { onFrame: async () => await hands.send({ image: videoElement }), width: 1280, height: 720 });
+            mpCamera.start();
+        }
+
+        function onResults(results) {
+            cameraViewCtx.clearRect(0, 0, cameraViewCanvas.width, cameraViewCanvas.height);
+            cameraViewCtx.drawImage(results.image, 0, 0, cameraViewCanvas.width, cameraViewCanvas.height);
+            handParticlesManager.forEach(hand => hand.isActive = false);
+
+            if (results.multiHandLandmarks) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    drawConnectors(cameraViewCtx, landmarks, HAND_CONNECTIONS, { color: '#FFFFFF', lineWidth: 2 });
+                    drawLandmarks(cameraViewCtx, landmarks, { color: '#FFFFFF', radius: 4 });
+
+                    const hand = handParticlesManager[i];
+                    hand.isActive = true;
+                    hand.lastSeen = Date.now();
+                    hand.targetOpacity = 1.0;
+
+                    const targetAttr = particles.geometry.attributes.targetPos;
+                    const uvAttr = particles.geometry.attributes.uv_override;
+                    const particleOffset = i * PARTICLES_PER_HAND;
+
+                    for (let j = 0; j < PARTICLES_PER_HAND; j++) {
+                        const landmarkIndex = j % landmarks.length;
+                        const landmark = landmarks[landmarkIndex];
+                        const particleIndex = particleOffset + j;
+                        
+                        targetAttr.setXYZ(particleIndex, (landmark.x - 0.5) * 100, -(landmark.y - 0.5) * 100, -landmark.z * 50);
+                        uvAttr.setXY(particleIndex, landmark.x, 1.0 - landmark.y);
+                    }
+                    targetAttr.needsUpdate = true;
+                    uvAttr.needsUpdate = true;
+                }
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const now = Date.now();
+            const posAttr = particles.geometry.attributes.position;
+            const targetAttr = particles.geometry.attributes.targetPos;
+            const opacityAttr = particles.geometry.attributes.opacity;
+
+            for (let i = 0; i < MAX_HANDS; i++) {
+                const hand = handParticlesManager[i];
+                if (!hand.isActive && (now - hand.lastSeen > FADE_OUT_TIME)) hand.targetOpacity = 0.0;
+                hand.currentOpacity += (hand.targetOpacity - hand.currentOpacity) * 0.1;
+                
+                const particleOffset = i * PARTICLES_PER_HAND;
+                for (let j = 0; j < PARTICLES_PER_HAND; j++) {
+                    const pIndex = particleOffset + j;
+                    opacityAttr.setX(pIndex, hand.currentOpacity);
+
+                    if (hand.targetOpacity > 0.01 && hand.currentOpacity < 0.1) {
+                         posAttr.setXYZ(pIndex, targetAttr.getX(pIndex), targetAttr.getY(pIndex), targetAttr.getZ(pIndex));
+                    } else {
+                         posAttr.setXYZ(
+                            pIndex,
+                            posAttr.getX(pIndex) + (targetAttr.getX(pIndex) - posAttr.getX(pIndex)) * 0.1,
+                            posAttr.getY(pIndex) + (targetAttr.getY(pIndex) - posAttr.getY(pIndex)) * 0.1,
+                            posAttr.getZ(pIndex) + (targetAttr.getZ(pIndex) - posAttr.getZ(pIndex)) * 0.1
+                        );
+                    }
+                }
+            }
+            posAttr.needsUpdate = true;
+            opacityAttr.needsUpdate = true;
+            
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            if(!camera || !renderer) return;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        startApp();
+    </script>
 </body>
 </html>
