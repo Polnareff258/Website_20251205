@@ -1,235 +1,582 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
+
 <head>
-    <title>Advanced 3D Hand Particle System</title>
+    <title>High-Fidelity 3D Hand Particle System</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
-    <!-- Core Three.js -->
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-    <!-- MediaPipe -->
+
+    <!-- Import Map for Three.js and Addons -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <!-- MediaPipe Globals (Easier to keep as legacy scripts for now) -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 
     <style>
-        body { font-family: Arial, sans-serif; background-color: #000; color: #fff; margin: 0; overflow: hidden; }
-        #container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-        #permission-prompt { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.5em; color: #ff4444; display: none; }
-        #camera-view { position: absolute; bottom: 20px; left: 20px; width: 320px; height: 240px; background-color: #111; border: 2px solid #333; border-radius: 8px; z-index: 10; }
-        .input_video { display: none; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background-color: #050505;
+            color: #fff;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        #container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Glassmorphism Prompts */
+        #permission-prompt {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.2em;
+            color: #ff6b6b;
+            background: rgba(20, 20, 20, 0.6);
+            backdrop-filter: blur(10px);
+            padding: 20px 40px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: none;
+            text-align: center;
+        }
+
+        /* Glassmorphism Camera Preview */
+        .camera-container {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            width: 320px;
+            height: 180px;
+            /* 16:9 Aspect */
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            transition: all 0.3s ease;
+            z-index: 100;
+        }
+
+        .camera-container:hover {
+            transform: scale(1.02);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        #camera-view {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .input_video {
+            display: none;
+        }
+
+        /* Loading Overlay */
+        #loading {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 999;
+            transition: opacity 1s ease;
+        }
+
+        .loader {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-left-color: #00ffff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
     </style>
 </head>
+
 <body>
+    <div id="loading">
+        <div class="loader"></div>
+    </div>
     <div id="container"></div>
-    <div id="permission-prompt">需要摄像头权限以实现手部检测</div>
-    <canvas id="camera-view"></canvas>
+    <div id="permission-prompt">Waiting for Camera Access...<br>请允许摄像头权限</div>
+
+    <div class="camera-container">
+        <canvas id="camera-view"></canvas>
+    </div>
     <video class="input_video"></video>
 
+    <!-- Shaders -->
     <script id="vertexShader" type="x-shader/x-vertex">
-        attribute vec2 uv_override;
+        attribute vec3 targetPos;
         attribute float opacity;
-        varying vec2 vUv;
+        attribute float sizeOffset;
+        attribute vec3 color;
+        
         varying float vOpacity;
+        varying vec3 vColor;
+        
+        uniform float uTime;
+        uniform float uSize;
+
         void main() {
-            vUv = uv_override;
             vOpacity = opacity;
-            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-            gl_PointSize = 2.5 * (300.0 / -mvPosition.z);
+            vColor = color;
+            
+            // Add some gentle noise movement
+            vec3 p = position;
+            
+            vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+            
+            // Size attenuation based on depth
+            gl_PointSize = (uSize + sizeOffset) * (300.0 / -mvPosition.z);
             gl_Position = projectionMatrix * mvPosition;
         }
     </script>
 
     <script id="fragmentShader" type="x-shader/x-fragment">
         uniform sampler2D pointTexture;
-        uniform sampler2D gradientTexture;
-        varying vec2 vUv;
         varying float vOpacity;
+        varying vec3 vColor;
+
         void main() {
-            vec4 colorFromGradient = texture2D(gradientTexture, vUv);
-            vec4 colorFromPoint = texture2D(pointTexture, gl_PointCoord);
-            gl_FragColor = vec4(colorFromGradient.rgb, colorFromGradient.a * colorFromPoint.a * vOpacity);
+            if (vOpacity <= 0.01) discard;
+            
+            vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+            if (texColor.a < 0.1) discard;
+
+            // Combine vertex color (dynamic) with texture alpha
+            gl_FragColor = vec4(vColor, vOpacity * texColor.a);
         }
     </script>
-    
-    <script>
-        const MAX_HANDS = 2;
-        const PARTICLES_PER_HAND = 5000;
-        const TOTAL_PARTICLES = MAX_HANDS * PARTICLES_PER_HAND;
-        const FADE_OUT_TIME = 1000;
 
-        let renderer, scene, camera, particles;
-        const handParticlesManager = [];
+    <!-- Main Logic -->
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
+        // --- Configuration ---
+        const CONFIG = {
+            maxHands: 2,
+            particlesPerHand: 4000,
+            trailSpeed: 0.15, // Lower = moer lag/trail
+            bloomStrength: 2.0,
+            bloomRadius: 0.5,
+            bloomThreshold: 0.1,
+            baseColor: { h: 0.6, s: 1.0, l: 0.7 }, // Blue-ish
+            pinchColor: { h: 1.0, s: 1.0, l: 0.6 }, // Red/White
+            particleSize: 4.0
+        };
+
+        let renderer, scene, camera, composer;
+        let particlesGeometry, particlesMaterial, particlesMesh;
+        let gui;
+
+        // Hand Data Management
+        const handsData = []; // Stores { isActive, landmarkTargets[], inertiaPos[] } for each hand
+
+        // Elements
         const container = document.getElementById('container');
-        const permissionPrompt = document.getElementById('permission-prompt');
         const videoElement = document.querySelector('.input_video');
-        const cameraViewCanvas = document.getElementById('camera-view');
-        const cameraViewCtx = cameraViewCanvas.getContext('2d');
+        const cameraCanvas = document.getElementById('camera-view');
+        const cameraCtx = cameraCanvas.getContext('2d');
+        const permissionPrompt = document.getElementById('permission-prompt');
+        const loading = document.getElementById('loading');
 
-        async function startApp() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
-                videoElement.srcObject = stream;
-                await new Promise(resolve => { videoElement.onplaying = resolve; videoElement.play(); });
-                initialize();
-            } catch (err) {
-                console.error("Error accessing camera: ", err);
-                permissionPrompt.style.display = 'block';
-            }
-        }
+        // --- Initialization ---
+        init();
 
-        function initialize() {
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.z = 80;
-            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
-            container.appendChild(renderer.domElement);
-
+        async function init() {
+            initThree();
             initParticles();
-            initMediaPipe();
+            initPostProcessing();
+            initGUI();
+
+            // Handle Resize
+            window.addEventListener('resize', onWindowResize);
+
+            // Start MediaPipe
+            await startCamera();
+
+            // Start Loop
             animate();
+
+            // Hide Loader
+            loading.style.opacity = '0';
+            setTimeout(() => loading.style.display = 'none', 1000);
         }
 
-        function createGradientTexture() {
-            const size = 128;
-            const canvas = document.createElement('canvas');
-            canvas.width = size; canvas.height = size;
-            const context = canvas.getContext('2d');
-            const gradient = context.createLinearGradient(0, 0, size, size);
-            gradient.addColorStop(0, '#ff00ff'); gradient.addColorStop(0.5, '#00ffff'); gradient.addColorStop(1, '#ffff00');
-            context.fillStyle = gradient;
-            context.fillRect(0, 0, size, size);
-            return new THREE.CanvasTexture(canvas);
+        function initThree() {
+            scene = new THREE.Scene();
+            // Optional: Subtle starry background or deep gradient
+            scene.fog = new THREE.FogExp2(0x000000, 0.002);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 100;
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" }); // Bloom handles AA essentially
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.toneMapping = THREE.ReinhardToneMapping;
+            container.appendChild(renderer.domElement);
         }
-        
-        function createPointTexture() {
-            const canvas = document.createElement('canvas');
-            canvas.width = 128; canvas.height = 128;
-            const context = canvas.getContext('2d');
-            const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
-            gradient.addColorStop(0, 'rgba(255,255,255,1)');
-            gradient.addColorStop(0.2, 'rgba(255,255,255,1)');
-            gradient.addColorStop(0.5, 'rgba(255,255,255,0.5)');
-            gradient.addColorStop(1, 'rgba(255,255,255,0)');
-            context.fillStyle = gradient;
-            context.fillRect(0, 0, 128, 128);
-            return new THREE.CanvasTexture(canvas);
+
+        function initPostProcessing() {
+            const renderScene = new RenderPass(scene, camera);
+
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = CONFIG.bloomThreshold;
+            bloomPass.strength = CONFIG.bloomStrength;
+            bloomPass.radius = CONFIG.bloomRadius;
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
         }
 
         function initParticles() {
-            for (let i = 0; i < MAX_HANDS; i++) {
-                handParticlesManager.push({ isActive: false, lastSeen: 0, currentOpacity: 0, targetOpacity: 0 });
+            const totalParticles = CONFIG.maxHands * CONFIG.particlesPerHand;
+
+            particlesGeometry = new THREE.BufferGeometry();
+
+            const positions = new Float32Array(totalParticles * 3);
+            const targetPos = new Float32Array(totalParticles * 3);
+            const colors = new Float32Array(totalParticles * 3);
+            const opacity = new Float32Array(totalParticles);
+            const sizeOffset = new Float32Array(totalParticles);
+
+            // Init buffer data
+            for (let i = 0; i < totalParticles; i++) {
+                opacity[i] = 0; // Start invisible
+                sizeOffset[i] = (Math.random() - 0.5) * 2.0; // Randomize size slightly
+
+                // Init colors to base
+                const color = new THREE.Color().setHSL(CONFIG.baseColor.h, CONFIG.baseColor.s, CONFIG.baseColor.l);
+                colors[i * 3] = color.r;
+                colors[i * 3 + 1] = color.g;
+                colors[i * 3 + 2] = color.b;
             }
 
-            const geometry = new THREE.BufferGeometry();
-            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES * 3), 3));
-            geometry.setAttribute('uv_override', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES * 2), 2));
-            geometry.setAttribute('targetPos', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES * 3), 3));
-            geometry.setAttribute('opacity', new THREE.BufferAttribute(new Float32Array(TOTAL_PARTICLES), 1));
-            
-            const shaderMaterial = new THREE.ShaderMaterial({
+            particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particlesGeometry.setAttribute('targetPos', new THREE.BufferAttribute(targetPos, 3));
+            particlesGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            particlesGeometry.setAttribute('opacity', new THREE.BufferAttribute(opacity, 1));
+            particlesGeometry.setAttribute('sizeOffset', new THREE.BufferAttribute(sizeOffset, 1));
+
+            // Create Texture
+            const sprite = createGlowTexture();
+
+            particlesMaterial = new THREE.ShaderMaterial({
                 uniforms: {
-                    pointTexture: { value: createPointTexture() },
-                    gradientTexture: { value: createGradientTexture() }
+                    pointTexture: { value: sprite },
+                    uTime: { value: 0 },
+                    uSize: { value: CONFIG.particleSize }
                 },
                 vertexShader: document.getElementById('vertexShader').textContent,
                 fragmentShader: document.getElementById('fragmentShader').textContent,
                 blending: THREE.AdditiveBlending,
-                transparent: true,
                 depthWrite: false,
+                transparent: true
             });
 
-            particles = new THREE.Points(geometry, shaderMaterial);
-            scene.add(particles);
+            particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
+            scene.add(particlesMesh);
+
+            // Init Hands Data Struct
+            for (let i = 0; i < CONFIG.maxHands; i++) {
+                handsData.push({
+                    isActive: false,
+                    lastSeen: 0,
+                    pinchStrength: 0, // 0 to 1
+                    landmarks: [], // Raw landmarks
+                    particleTargets: new Float32Array(CONFIG.particlesPerHand * 3) // Target XYZ for this hand's particles
+                });
+            }
         }
 
-        function initMediaPipe() {
-            const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}` });
-            hands.setOptions({ maxNumHands: MAX_HANDS, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-            hands.onResults(onResults);
-            const mpCamera = new Camera(videoElement, { onFrame: async () => await hands.send({ image: videoElement }), width: 1280, height: 720 });
-            mpCamera.start();
+        function createGlowTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+
+            // Soft glow
+            const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(0.4, 'rgba(255, 255, 255, 0.4)');
+            grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 64, 64);
+
+            return new THREE.CanvasTexture(canvas);
         }
 
-        function onResults(results) {
-            cameraViewCtx.clearRect(0, 0, cameraViewCanvas.width, cameraViewCanvas.height);
-            cameraViewCtx.drawImage(results.image, 0, 0, cameraViewCanvas.width, cameraViewCanvas.height);
-            handParticlesManager.forEach(hand => hand.isActive = false);
+        function initGUI() {
+            gui = new GUI({ title: 'System Controls' });
+
+            const folderVisual = gui.addFolder('Visuals');
+            folderVisual.add(CONFIG, 'bloomStrength', 0, 5).onChange(v => composer.passes[1].strength = v);
+            folderVisual.add(CONFIG, 'bloomRadius', 0, 1).onChange(v => composer.passes[1].radius = v);
+            folderVisual.add(CONFIG, 'particleSize', 1, 10).onChange(v => particlesMaterial.uniforms.uSize.value = v);
+            folderVisual.add(CONFIG, 'trailSpeed', 0.01, 1.0).name('Trail Responsiveness');
+
+            // Color Controls
+            const folderColor = gui.addFolder('Colors');
+            const paramColors = {
+                base: '#00ccff',
+                pinch: '#ffaa00'
+            };
+
+            folderColor.addColor(paramColors, 'base').onChange(v => {
+                const c = new THREE.Color(v);
+                const hsl = {}; c.getHSL(hsl);
+                CONFIG.baseColor = { h: hsl.h, s: hsl.s, l: hsl.l };
+            });
+
+            folderColor.addColor(paramColors, 'pinch').onChange(v => {
+                const c = new THREE.Color(v);
+                const hsl = {}; c.getHSL(hsl);
+                CONFIG.pinchColor = { h: hsl.h, s: hsl.s, l: hsl.l };
+            });
+            gui.close(); // Closed by default for clean look
+        }
+
+        // --- MediaPipe Logic ---
+        async function startCamera() {
+            try {
+                // Initialize Hands
+                const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}` });
+                hands.setOptions({
+                    maxNumHands: CONFIG.maxHands,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+                hands.onResults(onHandResults);
+
+                // Setup Camera
+                const cameraMP = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({ image: videoElement });
+                    },
+                    width: 1280,
+                    height: 720
+                });
+                await cameraMP.start();
+            } catch (err) {
+                console.error(err);
+                permissionPrompt.style.display = 'block';
+            }
+        }
+
+        function onHandResults(results) {
+            // Draw debug view
+            cameraCtx.save();
+            cameraCtx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
+            cameraCtx.drawImage(results.image, 0, 0, cameraCanvas.width, cameraCanvas.height);
+
+            // Reset active state for frame
+            handsData.forEach(h => h.isActive = false);
 
             if (results.multiHandLandmarks) {
                 for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    if (i >= CONFIG.maxHands) break;
+
                     const landmarks = results.multiHandLandmarks[i];
-                    drawConnectors(cameraViewCtx, landmarks, HAND_CONNECTIONS, { color: '#FFFFFF', lineWidth: 2 });
-                    drawLandmarks(cameraViewCtx, landmarks, { color: '#FFFFFF', radius: 4 });
+                    drawConnectors(cameraCtx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
+                    drawLandmarks(cameraCtx, landmarks, { color: '#FF0000', lineWidth: 1, radius: 2 });
 
-                    const hand = handParticlesManager[i];
+                    // Update Hand Data
+                    const hand = handsData[i];
                     hand.isActive = true;
-                    hand.lastSeen = Date.now();
-                    hand.targetOpacity = 1.0;
+                    hand.lastSeen = performance.now();
+                    hand.landmarks = landmarks;
 
-                    const targetAttr = particles.geometry.attributes.targetPos;
-                    const uvAttr = particles.geometry.attributes.uv_override;
-                    const particleOffset = i * PARTICLES_PER_HAND;
+                    // Calculate Pinch (Index Tip and Thumb Tip)
+                    // 4 = ThumbTip, 8 = IndexTip
+                    const thumb = landmarks[4];
+                    const index = landmarks[8];
+                    const dist = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
 
-                    for (let j = 0; j < PARTICLES_PER_HAND; j++) {
-                        const landmarkIndex = j % landmarks.length;
-                        const landmark = landmarks[landmarkIndex];
-                        const particleIndex = particleOffset + j;
-                        
-                        targetAttr.setXYZ(particleIndex, (landmark.x - 0.5) * 100, -(landmark.y - 0.5) * 100, -landmark.z * 50);
-                        uvAttr.setXY(particleIndex, landmark.x, 1.0 - landmark.y);
-                    }
-                    targetAttr.needsUpdate = true;
-                    uvAttr.needsUpdate = true;
+                    // Simple easing for pinch strength
+                    const targetPinch = dist < 0.05 ? 1.0 : 0.0; // 0.05 is heuristic threshold
+                    hand.pinchStrength += (targetPinch - hand.pinchStrength) * 0.2;
+
+                    // Update Particle Targets for this hand
+                    updateHandParticleTargets(hand, i);
+                }
+            }
+            cameraCtx.restore();
+        }
+
+        function updateHandParticleTargets(hand, handIndex) {
+            // Map landmarks to 3D space
+            // MediaPipe: x (0-1), y(0-1), z(approx scale). 0,0 is top-left.
+            // ThreeJS: 0,0 is center. Y is up.
+
+            const count = CONFIG.particlesPerHand;
+            const landmarks = hand.landmarks;
+
+            for (let j = 0; j < count; j++) {
+                // Distribute particles across landmarks or focus on palm/tips?
+                // Let's distribute along connections for structure, or fully random on landmarks
+
+                // Strategy: Random landmark + small jitter
+                const lmIndex = j % landmarks.length;
+                const lm = landmarks[lmIndex];
+
+                // Convert to ThreeJS coords
+                // Screen width ~ 150 units at z=0? Scaling factor needed.
+                // Assuming z=100 for camera, plane at z=0 has visible height ~1000? NO.
+                // Perspective: height = 2 * dist * tan(fov/2). 
+                // z=0, camZ=100. h = 2 * 100 * tan(37.5) ≈ 153.
+                // So y range is -76 to 76. x range depends on aspect.
+                const aspect = window.innerWidth / window.innerHeight;
+                const visibleHeight = 2 * Math.tan((camera.fov * Math.PI / 180) / 2) * camera.position.z;
+                const visibleWidth = visibleHeight * aspect;
+
+                const lx = (lm.x - 0.5) * visibleWidth;
+                const ly = -(lm.y - 0.5) * visibleHeight; // Flip Y
+                const lz = -lm.z * 50; // Depth scale
+
+                // PINCH EFFECT: If pinchStrength is high, pull everything to center of thumb/index
+                if (hand.pinchStrength > 0.5) {
+                    const thumb = landmarks[4];
+                    const index = landmarks[8];
+                    const cx = ((thumb.x + index.x) / 2 - 0.5) * visibleWidth;
+                    const cy = -((thumb.y + index.y) / 2 - 0.5) * visibleHeight;
+                    const cz = -((thumb.z + index.z) / 2) * 50;
+
+                    // Sphere effect
+                    // Random point in sphere
+                    const r = 10 * Math.random(); // radius 10
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.random() * Math.PI;
+
+                    const tx = cx + r * Math.sin(phi) * Math.cos(theta);
+                    const ty = cy + r * Math.sin(phi) * Math.sin(theta);
+                    const tz = cz + r * Math.cos(phi);
+
+                    hand.particleTargets[j * 3] = tx;
+                    hand.particleTargets[j * 3 + 1] = ty;
+                    hand.particleTargets[j * 3 + 2] = tz;
+                } else {
+                    // Normal tracking
+                    const jitter = 2.0;
+                    hand.particleTargets[j * 3] = lx + (Math.random() - 0.5) * jitter;
+                    hand.particleTargets[j * 3 + 1] = ly + (Math.random() - 0.5) * jitter;
+                    hand.particleTargets[j * 3 + 2] = lz + (Math.random() - 0.5) * jitter;
                 }
             }
         }
 
+        // --- Animation Loop ---
         function animate() {
             requestAnimationFrame(animate);
-            const now = Date.now();
-            const posAttr = particles.geometry.attributes.position;
-            const targetAttr = particles.geometry.attributes.targetPos;
-            const opacityAttr = particles.geometry.attributes.opacity;
 
-            for (let i = 0; i < MAX_HANDS; i++) {
-                const hand = handParticlesManager[i];
-                if (!hand.isActive && (now - hand.lastSeen > FADE_OUT_TIME)) hand.targetOpacity = 0.0;
-                hand.currentOpacity += (hand.targetOpacity - hand.currentOpacity) * 0.1;
-                
-                const particleOffset = i * PARTICLES_PER_HAND;
-                for (let j = 0; j < PARTICLES_PER_HAND; j++) {
-                    const pIndex = particleOffset + j;
-                    opacityAttr.setX(pIndex, hand.currentOpacity);
+            particlesMaterial.uniforms.uTime.value += 0.01;
 
-                    if (hand.targetOpacity > 0.01 && hand.currentOpacity < 0.1) {
-                         posAttr.setXYZ(pIndex, targetAttr.getX(pIndex), targetAttr.getY(pIndex), targetAttr.getZ(pIndex));
-                    } else {
-                         posAttr.setXYZ(
-                            pIndex,
-                            posAttr.getX(pIndex) + (targetAttr.getX(pIndex) - posAttr.getX(pIndex)) * 0.1,
-                            posAttr.getY(pIndex) + (targetAttr.getY(pIndex) - posAttr.getY(pIndex)) * 0.1,
-                            posAttr.getZ(pIndex) + (targetAttr.getZ(pIndex) - posAttr.getZ(pIndex)) * 0.1
-                        );
+            const positions = particlesGeometry.attributes.position.array;
+            const colors = particlesGeometry.attributes.color.array;
+            const opacities = particlesGeometry.attributes.opacity.array;
+
+            // Processing logic per hand
+            for (let h = 0; h < CONFIG.maxHands; h++) {
+                const hand = handsData[h];
+                const offset = h * CONFIG.particlesPerHand;
+
+                // Determine color based on Pinch
+                const targetColorHSL = hand.pinchStrength > 0.5 ? CONFIG.pinchColor : CONFIG.baseColor;
+                const tColor = new THREE.Color().setHSL(targetColorHSL.h, targetColorHSL.s, targetColorHSL.l);
+
+                // Fade out if not active
+                const timeSinceLastSeen = performance.now() - hand.lastSeen;
+                let targetOpacity = hand.isActive ? 1.0 : (timeSinceLastSeen < 1000 ? (1.0 - timeSinceLastSeen / 1000) : 0.0);
+
+                for (let i = 0; i < CONFIG.particlesPerHand; i++) {
+                    const idx = offset + i;
+
+                    // Update Opacity
+                    opacities[idx] += (targetOpacity - opacities[idx]) * 0.1;
+
+                    if (opacities[idx] > 0.01) {
+                        // Physics / Trail
+                        // Current Pos
+                        const px = positions[idx * 3];
+                        const py = positions[idx * 3 + 1];
+                        const pz = positions[idx * 3 + 2];
+
+                        // Target Pos
+                        const tx = hand.particleTargets[i * 3];
+                        const ty = hand.particleTargets[i * 3 + 1];
+                        const tz = hand.particleTargets[i * 3 + 2];
+
+                        // Lerp with drag (Trail effect)
+                        // If pinching, snappy. If not, flowy.
+                        const speed = hand.pinchStrength > 0.5 ? 0.2 : CONFIG.trailSpeed;
+
+                        positions[idx * 3] += (tx - px) * speed;
+                        positions[idx * 3 + 1] += (ty - py) * speed;
+                        positions[idx * 3 + 2] += (tz - pz) * speed;
+
+                        // Update Color
+                        colors[idx * 3] += (tColor.r - colors[idx * 3]) * 0.05;
+                        colors[idx * 3 + 1] += (tColor.g - colors[idx * 3 + 1]) * 0.05;
+                        colors[idx * 3 + 2] += (tColor.b - colors[idx * 3 + 2]) * 0.05;
                     }
                 }
             }
-            posAttr.needsUpdate = true;
-            opacityAttr.needsUpdate = true;
-            
-            renderer.render(scene, camera);
+
+            particlesGeometry.attributes.position.needsUpdate = true;
+            particlesGeometry.attributes.color.needsUpdate = true;
+            particlesGeometry.attributes.opacity.needsUpdate = true;
+
+            // Render
+            composer.render();
         }
 
-        window.addEventListener('resize', () => {
-            if(!camera || !renderer) return;
+        function onWindowResize() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-        });
-
-        startApp();
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
     </script>
 </body>
+
 </html>
