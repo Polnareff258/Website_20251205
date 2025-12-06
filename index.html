@@ -2,11 +2,22 @@
 <html lang="zh-CN">
 
 <head>
-    <title>High-Fidelity 3D Hand Particle System</title>
+    <title>High-Fidelity 3D Hand Particle System V3.2</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
 
-    <!-- Import Map for Three.js and Addons -->
+    <!-- Error Logger -->
+    <script>
+        window.onerror = function (msg, url, line) {
+            const d = document.getElementById('debug-log');
+            if (d) d.innerHTML += `<div style="color:red; background:rgba(0,0,0,0.8); padding:2px;">❌ ${msg} (${line})</div>`;
+        };
+    </script>
+    <div id="debug-log"
+        style="position:absolute; top:0; left:0; width:100%; z-index:10000; pointer-events:none; font-family:monospace; font-size:12px;">
+    </div>
+
+    <!-- Import Map -->
     <script type="importmap">
     {
         "imports": {
@@ -16,7 +27,7 @@
     }
     </script>
 
-    <!-- MediaPipe Globals (Easier to keep as legacy scripts for now) -->
+    <!-- MediaPipe Globals -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
         crossorigin="anonymous"></script>
@@ -25,7 +36,7 @@
     <style>
         body {
             font-family: 'Segoe UI', sans-serif;
-            background-color: #050505;
+            background-color: #000;
             color: #fff;
             margin: 0;
             overflow: hidden;
@@ -39,7 +50,6 @@
             height: 100%;
         }
 
-        /* Glassmorphism Prompts */
         #permission-prompt {
             position: absolute;
             top: 50%;
@@ -47,50 +57,52 @@
             transform: translate(-50%, -50%);
             font-size: 1.2em;
             color: #ff6b6b;
-            background: rgba(20, 20, 20, 0.6);
-            backdrop-filter: blur(10px);
+            background: rgba(20, 20, 20, 0.9);
             padding: 20px 40px;
             border-radius: 16px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            border: 1px solid #ff4444;
+            border-left: 5px solid #ff4444;
             display: none;
             text-align: center;
+            z-index: 2000;
         }
 
-        /* Glassmorphism Camera Preview */
         .camera-container {
             position: absolute;
             bottom: 30px;
             left: 30px;
-            width: 320px;
-            height: 180px;
-            /* 16:9 Aspect */
+            width: 240px;
+            height: 135px;
             background: rgba(255, 255, 255, 0.05);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-radius: 12px;
             border: 1px solid rgba(255, 255, 255, 0.1);
-            overflow: hidden;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-            transition: all 0.3s ease;
+            border-radius: 12px;
             z-index: 100;
+            opacity: 0.8;
         }
 
-        .camera-container:hover {
-            transform: scale(1.02);
-            border-color: rgba(255, 255, 255, 0.3);
+        #camera-status {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 10px;
+            color: #888;
+            text-align: center;
+            width: 100%;
         }
 
         #camera-view {
+            position: relative;
             width: 100%;
             height: 100%;
             object-fit: cover;
+            z-index: 2;
         }
 
         .input_video {
             display: none;
         }
 
-        /* Loading Overlay */
         #loading {
             position: absolute;
             top: 0;
@@ -101,17 +113,19 @@
             display: flex;
             justify-content: center;
             align-items: center;
+            flex-direction: column;
             z-index: 999;
             transition: opacity 1s ease;
         }
 
         .loader {
-            border: 4px solid rgba(255, 255, 255, 0.1);
+            border: 3px solid rgba(255, 255, 255, 0.1);
             border-left-color: #00ffff;
             border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
+            width: 50px;
+            height: 50px;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 20px;
         }
 
         @keyframes spin {
@@ -123,133 +137,174 @@
                 transform: rotate(360deg);
             }
         }
+
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 30px;
+            pointer-events: none;
+        }
+
+        .indicator {
+            font-size: 0.9em;
+            letter-spacing: 1px;
+            color: rgba(255, 255, 255, 0.7);
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
     </style>
 </head>
 
 <body>
     <div id="loading">
         <div class="loader"></div>
+        <div id="loading-msg">Loading Engine...</div>
     </div>
     <div id="container"></div>
-    <div id="permission-prompt">Waiting for Camera Access...<br>请允许摄像头权限</div>
+    <div id="permission-prompt">
+        <h3>Camera/Network Issue</h3>
+        <p id="error-msg">Please allow camera access.</p>
+    </div>
+
+    <div id="ui-overlay">
+        <div class="indicator" id="mode-text">MODE: TRAIL</div>
+    </div>
 
     <div class="camera-container">
+        <div id="camera-status">Initializing Camera...</div>
         <canvas id="camera-view"></canvas>
     </div>
     <video class="input_video"></video>
 
-    <!-- Shaders -->
-    <script id="vertexShader" type="x-shader/x-vertex">
-        attribute vec3 targetPos;
-        attribute float opacity;
-        attribute float sizeOffset;
-        attribute vec3 color;
-        
-        varying float vOpacity;
-        varying vec3 vColor;
-        
+    <script id="starVertex" type="x-shader/x-vertex">
+        attribute float size; varying float vAlpha;
         uniform float uTime;
-        uniform float uSize;
-
+        void main() {
+            vec3 pos = position;
+            float angle = uTime * 0.05;
+            float s = sin(angle); float c = cos(angle);
+            float x = pos.x * c - pos.z * s; float z = pos.x * s + pos.z * c; pos.x = x; pos.z = z;
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            gl_PointSize = size * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+            vAlpha = 0.5 + 0.5 * sin(uTime + pos.x);
+        }
+    </script>
+    <script id="starFragment" type="x-shader/x-fragment">
+        varying float vAlpha;
+        void main() {
+            float r = distance(gl_PointCoord, vec2(0.5));
+            if (r > 0.5) discard;
+            gl_FragColor = vec4(1.0, 1.0, 1.0, vAlpha * (1.0 - 2.0*r));
+        }
+    </script>
+    <script id="vertexShader" type="x-shader/x-vertex">
+        attribute vec3 targetPos; attribute float opacity; attribute vec3 color; attribute vec3 velocity;
+        varying float vOpacity; varying vec3 vColor;
+        uniform float uTime; uniform float uSize;
         void main() {
             vOpacity = opacity;
             vColor = color;
-            
-            // Add some gentle noise movement
-            vec3 p = position;
-            
-            vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-            
-            // Size attenuation based on depth
-            gl_PointSize = (uSize + sizeOffset) * (300.0 / -mvPosition.z);
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = uSize * (300.0 / -mvPosition.z);
             gl_Position = projectionMatrix * mvPosition;
         }
     </script>
-
     <script id="fragmentShader" type="x-shader/x-fragment">
-        uniform sampler2D pointTexture;
-        varying float vOpacity;
-        varying vec3 vColor;
-
+        uniform sampler2D pointTexture; varying float vOpacity; varying vec3 vColor;
         void main() {
             if (vOpacity <= 0.01) discard;
-            
             vec4 texColor = texture2D(pointTexture, gl_PointCoord);
             if (texColor.a < 0.1) discard;
-
-            // Combine vertex color (dynamic) with texture alpha
             gl_FragColor = vec4(vColor, vOpacity * texColor.a);
         }
     </script>
 
-    <!-- Main Logic -->
     <script type="module">
         import * as THREE from 'three';
         import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
         import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
         import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js';
         import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
-        // --- Configuration ---
+        // --- Config ---
         const CONFIG = {
-            maxHands: 2,
-            particlesPerHand: 4000,
-            trailSpeed: 0.15, // Lower = moer lag/trail
-            bloomStrength: 2.0,
-            bloomRadius: 0.5,
-            bloomThreshold: 0.1,
-            baseColor: { h: 0.6, s: 1.0, l: 0.7 }, // Blue-ish
-            pinchColor: { h: 1.0, s: 1.0, l: 0.6 }, // Red/White
-            particleSize: 4.0
+            mode: 'TRAIL', maxHands: 2, particlesPerHand: 4000, trailSpeed: 0.15,
+            bloomStrength: 1.8, bloomRadius: 0.6, bloomThreshold: 0.15,
+            baseColor: { h: 0.6, s: 1.0, l: 0.6 }, pinchColor: { h: 0.05, s: 1.0, l: 0.6 },
+            gravityForce: 3.5, particleSize: 4.0, shockwaveForce: 50.0
         };
+        const MODES = ['TRAIL', 'GRAVITY', 'CONNECT'];
 
-        let renderer, scene, camera, composer;
-        let particlesGeometry, particlesMaterial, particlesMesh;
-        let gui;
+        // --- Globals ---
+        let renderer, scene, camera, composer, particlesMesh, linesMesh, starsMesh, lightningMesh, rgbShiftPass, gui, clock = new THREE.Clock();
+        const handsData = [];
+        let shockwaveActive = 0;
+        let decayAmount = 0; // For glitch decay
 
-        // Hand Data Management
-        const handsData = []; // Stores { isActive, landmarkTargets[], inertiaPos[] } for each hand
-
-        // Elements
+        // --- UI ELements ---
+        const uiMode = document.getElementById('mode-text');
         const container = document.getElementById('container');
         const videoElement = document.querySelector('.input_video');
         const cameraCanvas = document.getElementById('camera-view');
         const cameraCtx = cameraCanvas.getContext('2d');
-        const permissionPrompt = document.getElementById('permission-prompt');
         const loading = document.getElementById('loading');
+        const permissionPrompt = document.getElementById('permission-prompt');
+        const errorMsg = document.getElementById('error-msg');
+        const camStatus = document.getElementById('camera-status');
 
-        // --- Initialization ---
+        // --- FAILSAFE LOADER TIMEOUT ---
+        setTimeout(() => {
+            if (loading.style.display !== 'none') {
+                document.getElementById('loading-msg').innerHTML = "Initializing is slow...<br>Starting anyway.";
+                setTimeout(() => { loading.style.opacity = '0'; setTimeout(() => loading.style.display = 'none', 1000); }, 1000);
+            }
+        }, 4000);
+
         init();
 
         async function init() {
-            initThree();
-            initParticles();
-            initPostProcessing();
-            initGUI();
+            try {
+                initThree();
+                initBackground();
+                initParticles();
+                initConnections();
+                initLightning();
+                initPostProcessing();
+                initGUI();
+            } catch (e) {
+                console.error(e);
+                alert("Core 3D Engine Failed: " + e.message);
+            }
 
-            // Handle Resize
-            window.addEventListener('resize', onWindowResize);
-
-            // Start MediaPipe
-            await startCamera();
-
-            // Start Loop
+            // Start loop FIRST so user sees something
             animate();
 
-            // Hide Loader
-            loading.style.opacity = '0';
-            setTimeout(() => loading.style.display = 'none', 1000);
+            // Try Camera Async (Don't await)
+            startCamera().then(() => {
+                camStatus.style.display = 'none';
+                loading.style.opacity = '0';
+                setTimeout(() => loading.style.display = 'none', 1000);
+            }).catch(e => {
+                console.error(e);
+                camStatus.innerText = "Camera Failed";
+                loading.style.opacity = '0';
+                setTimeout(() => loading.style.display = 'none', 1000);
+                permissionPrompt.style.display = 'block';
+                errorMsg.innerText = "Camera access denied or networking issue. The visualizer will run in idle mode.";
+            });
+
+            window.addEventListener('resize', onWindowResize);
         }
 
         function initThree() {
             scene = new THREE.Scene();
-            // Optional: Subtle starry background or deep gradient
             scene.fog = new THREE.FogExp2(0x000000, 0.002);
-
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.position.z = 100;
-
-            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" }); // Bloom handles AA essentially
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             renderer.toneMapping = THREE.ReinhardToneMapping;
@@ -257,325 +312,157 @@
         }
 
         function initPostProcessing() {
-            const renderScene = new RenderPass(scene, camera);
-
-            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-            bloomPass.threshold = CONFIG.bloomThreshold;
-            bloomPass.strength = CONFIG.bloomStrength;
-            bloomPass.radius = CONFIG.bloomRadius;
-
             composer = new EffectComposer(renderer);
-            composer.addPass(renderScene);
-            composer.addPass(bloomPass);
+            composer.addPass(new RenderPass(scene, camera));
+            const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloom.threshold = CONFIG.bloomThreshold; bloom.strength = CONFIG.bloomStrength; bloom.radius = CONFIG.bloomRadius;
+            composer.addPass(bloom);
+            rgbShiftPass = new ShaderPass(RGBShiftShader); rgbShiftPass.uniforms['amount'].value = 0.0; composer.addPass(rgbShiftPass);
         }
-
+        function initBackground() {
+            const count = 2000; const geo = new THREE.BufferGeometry(); const pos = new Float32Array(count * 3); const size = new Float32Array(count);
+            for (let i = 0; i < count; i++) { pos[i * 3] = (Math.random() - 0.5) * 400; pos[i * 3 + 1] = (Math.random() - 0.5) * 400; pos[i * 3 + 2] = (Math.random() - 0.5) * 200 - 50; size[i] = Math.random() * 2.0; }
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
+            const mat = new THREE.ShaderMaterial({ uniforms: { uTime: { value: 0 } }, vertexShader: document.getElementById('starVertex').textContent, fragmentShader: document.getElementById('starFragment').textContent, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+            starsMesh = new THREE.Points(geo, mat); scene.add(starsMesh);
+        }
         function initParticles() {
-            const totalParticles = CONFIG.maxHands * CONFIG.particlesPerHand;
-
-            particlesGeometry = new THREE.BufferGeometry();
-
-            const positions = new Float32Array(totalParticles * 3);
-            const targetPos = new Float32Array(totalParticles * 3);
-            const colors = new Float32Array(totalParticles * 3);
-            const opacity = new Float32Array(totalParticles);
-            const sizeOffset = new Float32Array(totalParticles);
-
-            // Init buffer data
-            for (let i = 0; i < totalParticles; i++) {
-                opacity[i] = 0; // Start invisible
-                sizeOffset[i] = (Math.random() - 0.5) * 2.0; // Randomize size slightly
-
-                // Init colors to base
-                const color = new THREE.Color().setHSL(CONFIG.baseColor.h, CONFIG.baseColor.s, CONFIG.baseColor.l);
-                colors[i * 3] = color.r;
-                colors[i * 3 + 1] = color.g;
-                colors[i * 3 + 2] = color.b;
+            const total = CONFIG.maxHands * CONFIG.particlesPerHand; const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(total * 3); const vel = new Float32Array(total * 3); const col = new Float32Array(total * 3); const op = new Float32Array(total);
+            for (let i = 0; i < total; i++) {
+                pos[i * 3] = (Math.random() - 0.5) * 300; pos[i * 3 + 1] = (Math.random() - 0.5) * 300; pos[i * 3 + 2] = (Math.random() - 0.5) * 100;
+                const c = new THREE.Color().setHSL(CONFIG.baseColor.h, CONFIG.baseColor.s, CONFIG.baseColor.l);
+                col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
             }
-
-            particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            particlesGeometry.setAttribute('targetPos', new THREE.BufferAttribute(targetPos, 3));
-            particlesGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-            particlesGeometry.setAttribute('opacity', new THREE.BufferAttribute(opacity, 1));
-            particlesGeometry.setAttribute('sizeOffset', new THREE.BufferAttribute(sizeOffset, 1));
-
-            // Create Texture
-            const sprite = createGlowTexture();
-
-            particlesMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    pointTexture: { value: sprite },
-                    uTime: { value: 0 },
-                    uSize: { value: CONFIG.particleSize }
-                },
-                vertexShader: document.getElementById('vertexShader').textContent,
-                fragmentShader: document.getElementById('fragmentShader').textContent,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false,
-                transparent: true
-            });
-
-            particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
-            scene.add(particlesMesh);
-
-            // Init Hands Data Struct
-            for (let i = 0; i < CONFIG.maxHands; i++) {
-                handsData.push({
-                    isActive: false,
-                    lastSeen: 0,
-                    pinchStrength: 0, // 0 to 1
-                    landmarks: [], // Raw landmarks
-                    particleTargets: new Float32Array(CONFIG.particlesPerHand * 3) // Target XYZ for this hand's particles
-                });
-            }
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('velocity', new THREE.BufferAttribute(vel, 3)); geo.setAttribute('color', new THREE.BufferAttribute(col, 3)); geo.setAttribute('opacity', new THREE.BufferAttribute(op, 1));
+            const mat = new THREE.ShaderMaterial({ uniforms: { pointTexture: { value: createGlowTexture() }, uTime: { value: 0 }, uSize: { value: CONFIG.particleSize } }, vertexShader: document.getElementById('vertexShader').textContent, fragmentShader: document.getElementById('fragmentShader').textContent, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+            particlesMesh = new THREE.Points(geo, mat); scene.add(particlesMesh);
+            for (let i = 0; i < CONFIG.maxHands; i++) handsData.push({ isActive: false, lastSeen: 0, pinchStrength: 0, landmarks: [], targetPos: new Float32Array(CONFIG.particlesPerHand * 3), centroid: new THREE.Vector3(), velocity: new THREE.Vector3(), lastEx: 0, lastEy: 0, lastEz: 0 });
         }
-
-        function createGlowTexture() {
-            const canvas = document.createElement('canvas');
-            canvas.width = 64; canvas.height = 64;
-            const ctx = canvas.getContext('2d');
-
-            // Soft glow
-            const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
-            grad.addColorStop(0.4, 'rgba(255, 255, 255, 0.4)');
-            grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-
-            ctx.fillStyle = grad;
-            ctx.fillRect(0, 0, 64, 64);
-
-            return new THREE.CanvasTexture(canvas);
+        function createGlowTexture() { const c = document.createElement('canvas'); c.width = 64; c.height = 64; const ctx = c.getContext('2d'); const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32); g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.4, 'rgba(255,255,255,0.4)'); g.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); }
+        function initConnections() {
+            const max = CONFIG.maxHands * CONFIG.particlesPerHand; const geo = new THREE.BufferGeometry(); linesMesh = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.15, blending: THREE.AdditiveBlending }));
+            const pos = new Float32Array(max * 2 * 3); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            linesMesh.visible = false; scene.add(linesMesh);
         }
+        function initLightning() { const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(50 * 3), 3)); lightningMesh = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 3 })); scene.add(lightningMesh); }
+        function initGUI() { gui = new GUI({ title: 'V3.2 Controls' }); gui.add(CONFIG, 'mode', MODES).onChange(v => { uiMode.innerText = 'MODE: ' + v; linesMesh.visible = (v === 'CONNECT'); }); gui.add(CONFIG, 'bloomStrength', 0, 5).onChange(v => composer.passes[1].strength = v); gui.add(CONFIG, 'shockwaveForce', 10, 100); const f = gui.addFolder('Colors'); f.addColor({ base: '#00ccff' }, 'base').onChange(v => { const c = new THREE.Color(v); const h = {}; c.getHSL(h); CONFIG.baseColor = { h: h.h, s: h.s, l: h.l }; }); }
 
-        function initGUI() {
-            gui = new GUI({ title: 'System Controls' });
-
-            const folderVisual = gui.addFolder('Visuals');
-            folderVisual.add(CONFIG, 'bloomStrength', 0, 5).onChange(v => composer.passes[1].strength = v);
-            folderVisual.add(CONFIG, 'bloomRadius', 0, 1).onChange(v => composer.passes[1].radius = v);
-            folderVisual.add(CONFIG, 'particleSize', 1, 10).onChange(v => particlesMaterial.uniforms.uSize.value = v);
-            folderVisual.add(CONFIG, 'trailSpeed', 0.01, 1.0).name('Trail Responsiveness');
-
-            // Color Controls
-            const folderColor = gui.addFolder('Colors');
-            const paramColors = {
-                base: '#00ccff',
-                pinch: '#ffaa00'
-            };
-
-            folderColor.addColor(paramColors, 'base').onChange(v => {
-                const c = new THREE.Color(v);
-                const hsl = {}; c.getHSL(hsl);
-                CONFIG.baseColor = { h: hsl.h, s: hsl.s, l: hsl.l };
-            });
-
-            folderColor.addColor(paramColors, 'pinch').onChange(v => {
-                const c = new THREE.Color(v);
-                const hsl = {}; c.getHSL(hsl);
-                CONFIG.pinchColor = { h: hsl.h, s: hsl.s, l: hsl.l };
-            });
-            gui.close(); // Closed by default for clean look
-        }
-
-        // --- MediaPipe Logic ---
         async function startCamera() {
-            try {
-                // Initialize Hands
-                const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}` });
-                hands.setOptions({
-                    maxNumHands: CONFIG.maxHands,
-                    modelComplexity: 1,
-                    minDetectionConfidence: 0.5,
-                    minTrackingConfidence: 0.5
-                });
-                hands.onResults(onHandResults);
-
-                // Setup Camera
-                const cameraMP = new Camera(videoElement, {
-                    onFrame: async () => {
-                        await hands.send({ image: videoElement });
-                    },
-                    width: 1280,
-                    height: 720
-                });
-                await cameraMP.start();
-            } catch (err) {
-                console.error(err);
-                permissionPrompt.style.display = 'block';
-            }
+            const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+            hands.setOptions({ maxNumHands: CONFIG.maxHands, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            hands.onResults(onResults);
+            const cam = new Camera(videoElement, { onFrame: async () => await hands.send({ image: videoElement }), width: 1280, height: 720 });
+            await cam.start();
         }
 
-        function onHandResults(results) {
-            // Draw debug view
-            cameraCtx.save();
-            cameraCtx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
-            cameraCtx.drawImage(results.image, 0, 0, cameraCanvas.width, cameraCanvas.height);
-
-            // Reset active state for frame
+        function onResults(results) {
+            cameraCtx.clearRect(0, 0, 240, 135); cameraCtx.drawImage(results.image, 0, 0, 240, 135);
             handsData.forEach(h => h.isActive = false);
-
             if (results.multiHandLandmarks) {
+                let hA = null, hB = null;
                 for (let i = 0; i < results.multiHandLandmarks.length; i++) {
                     if (i >= CONFIG.maxHands) break;
-
-                    const landmarks = results.multiHandLandmarks[i];
-                    drawConnectors(cameraCtx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
-                    drawLandmarks(cameraCtx, landmarks, { color: '#FF0000', lineWidth: 1, radius: 2 });
-
-                    // Update Hand Data
-                    const hand = handsData[i];
-                    hand.isActive = true;
-                    hand.lastSeen = performance.now();
-                    hand.landmarks = landmarks;
-
-                    // Calculate Pinch (Index Tip and Thumb Tip)
-                    // 4 = ThumbTip, 8 = IndexTip
-                    const thumb = landmarks[4];
-                    const index = landmarks[8];
-                    const dist = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
-
-                    // Simple easing for pinch strength
-                    const targetPinch = dist < 0.05 ? 1.0 : 0.0; // 0.05 is heuristic threshold
-                    hand.pinchStrength += (targetPinch - hand.pinchStrength) * 0.2;
-
-                    // Update Particle Targets for this hand
-                    updateHandParticleTargets(hand, i);
+                    const lm = results.multiHandLandmarks[i];
+                    drawConnectors(cameraCtx, lm, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
+                    const h = handsData[i]; h.isActive = true; h.lastSeen = performance.now(); h.landmarks = lm;
+                    let cx = 0, cy = 0, cz = 0; lm.forEach(l => { cx += l.x; cy += l.y; cz += l.z }); cx /= 21; cy /= 21; cz /= 21;
+                    const wCx = (cx - 0.5) * 150; const wCy = -(cy - 0.5) * 100; const wCz = -cz * 50;
+                    h.velocity.set(wCx - h.lastEx, wCy - h.lastEy, wCz - h.lastEz); h.lastEx = wCx; h.lastEy = wCy; h.lastEz = wCz; h.centroid.set(wCx, wCy, wCz);
+                    const thumb = lm[4], index = lm[8]; const dist = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
+                    h.pinchStrength += ((dist < 0.05 ? 1 : 0) - h.pinchStrength) * 0.2;
+                    if (i == 0) hA = h; if (i == 1) hB = h; updateTargets(h, i);
                 }
-            }
-            cameraCtx.restore();
-        }
-
-        function updateHandParticleTargets(hand, handIndex) {
-            // Map landmarks to 3D space
-            // MediaPipe: x (0-1), y(0-1), z(approx scale). 0,0 is top-left.
-            // ThreeJS: 0,0 is center. Y is up.
-
-            const count = CONFIG.particlesPerHand;
-            const landmarks = hand.landmarks;
-
-            for (let j = 0; j < count; j++) {
-                // Distribute particles across landmarks or focus on palm/tips?
-                // Let's distribute along connections for structure, or fully random on landmarks
-
-                // Strategy: Random landmark + small jitter
-                const lmIndex = j % landmarks.length;
-                const lm = landmarks[lmIndex];
-
-                // Convert to ThreeJS coords
-                // Screen width ~ 150 units at z=0? Scaling factor needed.
-                // Assuming z=100 for camera, plane at z=0 has visible height ~1000? NO.
-                // Perspective: height = 2 * dist * tan(fov/2). 
-                // z=0, camZ=100. h = 2 * 100 * tan(37.5) ≈ 153.
-                // So y range is -76 to 76. x range depends on aspect.
-                const aspect = window.innerWidth / window.innerHeight;
-                const visibleHeight = 2 * Math.tan((camera.fov * Math.PI / 180) / 2) * camera.position.z;
-                const visibleWidth = visibleHeight * aspect;
-
-                const lx = (lm.x - 0.5) * visibleWidth;
-                const ly = -(lm.y - 0.5) * visibleHeight; // Flip Y
-                const lz = -lm.z * 50; // Depth scale
-
-                // PINCH EFFECT: If pinchStrength is high, pull everything to center of thumb/index
-                if (hand.pinchStrength > 0.5) {
-                    const thumb = landmarks[4];
-                    const index = landmarks[8];
-                    const cx = ((thumb.x + index.x) / 2 - 0.5) * visibleWidth;
-                    const cy = -((thumb.y + index.y) / 2 - 0.5) * visibleHeight;
-                    const cz = -((thumb.z + index.z) / 2) * 50;
-
-                    // Sphere effect
-                    // Random point in sphere
-                    const r = 10 * Math.random(); // radius 10
-                    const theta = Math.random() * Math.PI * 2;
-                    const phi = Math.random() * Math.PI;
-
-                    const tx = cx + r * Math.sin(phi) * Math.cos(theta);
-                    const ty = cy + r * Math.sin(phi) * Math.sin(theta);
-                    const tz = cz + r * Math.cos(phi);
-
-                    hand.particleTargets[j * 3] = tx;
-                    hand.particleTargets[j * 3 + 1] = ty;
-                    hand.particleTargets[j * 3 + 2] = tz;
-                } else {
-                    // Normal tracking
-                    const jitter = 2.0;
-                    hand.particleTargets[j * 3] = lx + (Math.random() - 0.5) * jitter;
-                    hand.particleTargets[j * 3 + 1] = ly + (Math.random() - 0.5) * jitter;
-                    hand.particleTargets[j * 3 + 2] = lz + (Math.random() - 0.5) * jitter;
-                }
+                if (hA && hB && hA.isActive && hB.isActive && hA.centroid.distanceTo(hB.centroid) < 30 && new THREE.Vector3().subVectors(hA.velocity, hB.velocity).length() > 5) triggerShockwave(new THREE.Vector3().addVectors(hA.centroid, hB.centroid).multiplyScalar(0.5));
             }
         }
 
-        // --- Animation Loop ---
+        function triggerShockwave(c) {
+            if (shockwaveActive > 0.1) return; shockwaveActive = 1.0;
+            const pos = particlesMesh.geometry.attributes.position.array; const v = particlesMesh.geometry.attributes.velocity.array;
+            for (let i = 0; i < pos.length / 3; i++) {
+                const px = pos[i * 3], py = pos[i * 3 + 1], pz = pos[i * 3 + 2]; const dx = px - c.x, dy = py - c.y, dz = pz - c.z;
+                const d2 = dx * dx + dy * dy + dz * dz + 0.1, d = Math.sqrt(d2), f = CONFIG.shockwaveForce * 50 / d2;
+                v[i * 3] += (dx / d) * f; v[i * 3 + 1] += (dy / d) * f; v[i * 3 + 2] += (dz / d) * f;
+            }
+        }
+
+        function updateTargets(h, idx) {
+            const aspect = window.innerWidth / window.innerHeight; const vH = 2 * Math.tan((camera.fov * Math.PI / 180) / 2) * camera.position.z; const vW = vH * aspect;
+            const wL = h.landmarks.map(l => ({ x: (l.x - 0.5) * vW, y: -(l.y - 0.5) * vH, z: -l.z * 50 }));
+            let px = 0, py = 0, pz = 0; if (h.pinchStrength > 0.1) { const t = wL[4], idx = wL[8]; px = (t.x + idx.x) / 2; py = (t.y + idx.y) / 2; pz = (t.z + idx.z) / 2; }
+            for (let j = 0; j < CONFIG.particlesPerHand; j++) {
+                const lm = wL[j % 21]; let tx, ty, tz;
+                if (h.pinchStrength > 0.5) { const r = 8 * Math.random(), th = Math.random() * 6.28, ph = Math.random() * 3.14; tx = px + r * Math.sin(ph) * Math.cos(th); ty = py + r * Math.sin(ph) * Math.sin(th); tz = pz + r * Math.cos(ph); }
+                else if (CONFIG.mode === 'GRAVITY') { tx = 0; ty = 0; tz = 0; }
+                else { const jit = CONFIG.mode === 'CONNECT' ? 1.0 : 3.0; tx = lm.x + (Math.random() - 0.5) * jit; ty = lm.y + (Math.random() - 0.5) * jit; tz = lm.z + (Math.random() - 0.5) * jit; }
+                h.targetPos[j * 3] = tx; h.targetPos[j * 3 + 1] = ty; h.targetPos[j * 3 + 2] = tz;
+            }
+        }
+
         function animate() {
             requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+            starsMesh.material.uniforms.uTime.value = time;
+            particlesMesh.material.uniforms.uTime.value = time;
 
-            particlesMaterial.uniforms.uTime.value += 0.01;
+            // Glitch decay
+            if (shockwaveActive > 0.01) { shockwaveActive *= 0.9; rgbShiftPass.uniforms['amount'].value = shockwaveActive * 0.02; }
+            else rgbShiftPass.uniforms['amount'].value = 0;
 
-            const positions = particlesGeometry.attributes.position.array;
-            const colors = particlesGeometry.attributes.color.array;
-            const opacities = particlesGeometry.attributes.opacity.array;
+            updatePhysics(time); updateLightning(time); composer.render();
+        }
 
-            // Processing logic per hand
+        function updatePhysics(time) {
+            const pos = particlesMesh.geometry.attributes.position.array; const vel = particlesMesh.geometry.attributes.velocity.array;
+            const col = particlesMesh.geometry.attributes.color.array; const op = particlesMesh.geometry.attributes.opacity.array;
+            const lPos = CONFIG.mode === 'CONNECT' ? linesMesh.geometry.attributes.position.array : null; let lIdx = 0;
+
             for (let h = 0; h < CONFIG.maxHands; h++) {
-                const hand = handsData[h];
-                const offset = h * CONFIG.particlesPerHand;
-
-                // Determine color based on Pinch
-                const targetColorHSL = hand.pinchStrength > 0.5 ? CONFIG.pinchColor : CONFIG.baseColor;
-                const tColor = new THREE.Color().setHSL(targetColorHSL.h, targetColorHSL.s, targetColorHSL.l);
-
-                // Fade out if not active
-                const timeSinceLastSeen = performance.now() - hand.lastSeen;
-                let targetOpacity = hand.isActive ? 1.0 : (timeSinceLastSeen < 1000 ? (1.0 - timeSinceLastSeen / 1000) : 0.0);
+                const hand = handsData[h], off = h * CONFIG.particlesPerHand, cx = hand.centroid.x, cy = hand.centroid.y, cz = hand.centroid.z;
+                const tColor = new THREE.Color().setHSL((hand.pinchStrength > 0.5 ? CONFIG.pinchColor : CONFIG.baseColor).h, (hand.pinchStrength > 0.5 ? CONFIG.pinchColor : CONFIG.baseColor).s, (hand.pinchStrength > 0.5 ? CONFIG.pinchColor : CONFIG.baseColor).l);
+                let targetOp = (hand.isActive || (performance.now() - hand.lastSeen < 1000)) ? 1.0 : 0.0;
 
                 for (let i = 0; i < CONFIG.particlesPerHand; i++) {
-                    const idx = offset + i;
+                    const idx = off + i; op[idx] += (targetOp - op[idx]) * 0.1; if (op[idx] <= 0.01) continue;
+                    let px = pos[idx * 3], py = pos[idx * 3 + 1], pz = pos[idx * 3 + 2], vx = vel[idx * 3], vy = vel[idx * 3 + 1], vz = vel[idx * 3 + 2];
 
-                    // Update Opacity
-                    opacities[idx] += (targetOpacity - opacities[idx]) * 0.1;
+                    if (CONFIG.mode === 'GRAVITY') {
+                        if (hand.isActive) { const dx = cx - px, dy = cy - py, dz = cz - pz, d = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.1, f = CONFIG.gravityForce / d; vx += dx * f * 0.01; vy += dy * f * 0.01; vz += dz * f * 0.01; vx += (Math.random() - 0.5) * 0.5; vy += (Math.random() - 0.5) * 0.5; }
+                        else { vx += Math.sin(time + idx) * 0.01; vy += Math.cos(time + idx) * 0.01; }
+                    }
+                    else { const s = hand.pinchStrength > 0.5 ? 0.2 : CONFIG.trailSpeed; vx += (hand.targetPos[i * 3] - px) * s; vy += (hand.targetPos[i * 3 + 1] - py) * s; vz += (hand.targetPos[i * 3 + 2] - pz) * s; }
 
-                    if (opacities[idx] > 0.01) {
-                        // Physics / Trail
-                        // Current Pos
-                        const px = positions[idx * 3];
-                        const py = positions[idx * 3 + 1];
-                        const pz = positions[idx * 3 + 2];
+                    px += vx; py += vy; pz += vz; vx *= 0.9; vy *= 0.9; vz *= 0.9;
+                    pos[idx * 3] = px; pos[idx * 3 + 1] = py; pos[idx * 3 + 2] = pz; vel[idx * 3] = vx; vel[idx * 3 + 1] = vy; vel[idx * 3 + 2] = vz;
+                    col[idx * 3] += (tColor.r - col[idx * 3]) * 0.05; col[idx * 3 + 1] += (tColor.g - col[idx * 3 + 1]) * 0.05; col[idx * 3 + 2] += (tColor.b - col[idx * 3 + 2]) * 0.05;
 
-                        // Target Pos
-                        const tx = hand.particleTargets[i * 3];
-                        const ty = hand.particleTargets[i * 3 + 1];
-                        const tz = hand.particleTargets[i * 3 + 2];
-
-                        // Lerp with drag (Trail effect)
-                        // If pinching, snappy. If not, flowy.
-                        const speed = hand.pinchStrength > 0.5 ? 0.2 : CONFIG.trailSpeed;
-
-                        positions[idx * 3] += (tx - px) * speed;
-                        positions[idx * 3 + 1] += (ty - py) * speed;
-                        positions[idx * 3 + 2] += (tz - pz) * speed;
-
-                        // Update Color
-                        colors[idx * 3] += (tColor.r - colors[idx * 3]) * 0.05;
-                        colors[idx * 3 + 1] += (tColor.g - colors[idx * 3 + 1]) * 0.05;
-                        colors[idx * 3 + 2] += (tColor.b - colors[idx * 3 + 2]) * 0.05;
+                    if (CONFIG.mode === 'CONNECT' && i % 10 === 0 && lIdx < lPos.length) {
+                        const n = off + ((i + 5) % CONFIG.particlesPerHand), nx = pos[n * 3], ny = pos[n * 3 + 1], nz = pos[n * 3 + 2];
+                        if ((px - nx) ** 2 + (py - ny) ** 2 + (pz - nz) ** 2 < 400) { lPos[lIdx++] = px; lPos[lIdx++] = py; lPos[lIdx++] = pz; lPos[lIdx++] = nx; lPos[lIdx++] = ny; lPos[lIdx++] = nz; }
                     }
                 }
             }
-
-            particlesGeometry.attributes.position.needsUpdate = true;
-            particlesGeometry.attributes.color.needsUpdate = true;
-            particlesGeometry.attributes.opacity.needsUpdate = true;
-
-            // Render
-            composer.render();
+            if (CONFIG.mode === 'CONNECT') { for (let k = lIdx; k < lPos.length; k++)lPos[k] = 0; linesMesh.geometry.attributes.position.needsUpdate = true; }
+            particlesMesh.geometry.attributes.position.needsUpdate = true; particlesMesh.geometry.attributes.velocity.needsUpdate = true;
+            particlesMesh.geometry.attributes.color.needsUpdate = true; particlesMesh.geometry.attributes.opacity.needsUpdate = true;
         }
 
-        function onWindowResize() {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            composer.setSize(window.innerWidth, window.innerHeight);
+        function updateLightning(t) {
+            // Same as previous
+            const h1 = handsData[0], h2 = handsData[1];
+            if (h1.isActive && h2.isActive && h1.centroid.distanceTo(h2.centroid) < 80) {
+                const pos = lightningMesh.geometry.attributes.position.array, seg = pos.length / 3;
+                for (let i = 0; i < seg; i++) {
+                    const r = (segment, start, end) => (start * (1 - segment) + end * segment);
+                    const ti = i / (seg - 1), x = r(ti, h1.centroid.x, h2.centroid.x), y = r(ti, h1.centroid.y, h2.centroid.y), z = r(ti, h1.centroid.z, h2.centroid.z);
+                    pos[i * 3] = x + (Math.random() - 0.5) * 5; pos[i * 3 + 1] = y + (Math.random() - 0.5) * 5; pos[i * 3 + 2] = z + (Math.random() - 0.5) * 5;
+                }
+                lightningMesh.geometry.attributes.position.needsUpdate = true; lightningMesh.visible = true;
+            } else lightningMesh.visible = false;
         }
+
+        function onWindowResize() { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); composer.setSize(window.innerWidth, window.innerHeight); }
     </script>
 </body>
 
